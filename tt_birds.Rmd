@@ -1,0 +1,134 @@
+---
+title: "#TidyTuesday Look at Australian Birds"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(janitor)
+library(readxl)
+library(cluster)
+library(ggpubr)
+library(factoextra)
+library(ggrepel)
+```
+
+First things first, bring in the data. Here we go back to the file from the source (<https://doi.org/10.1371/journal.pone.0150899>) so that we can get the Birdbath IDs, which were lost in the TidyTuesday export
+
+```{r data_in}
+bird_baths <- read_excel("S1File.xlsx") %>%
+  clean_names() %>%
+  mutate(birdbath_number = row_number()) %>%
+  relocate(birdbath_number) 
+
+birds <- bird_baths  %>%
+ select(!c(survey_year, urban_rural, bioregions, birdbath_number)) %>%
+  t() %>%
+  as_tibble(rownames = "bird_name", .name_repair = "universal") %>%
+  rename(total = last_col()) %>%
+  select(bird_name, total)
+
+# transpose so we are looking at birds as observations and their appearance at given birdbaths as variables
+
+bird_matrix <- bird_baths %>%
+  drop_na(survey_year)%>%
+  select(!c(survey_year, urban_rural, bioregions, birdbath_number)) %>%
+  t()
+```
+
+Then we get the clusters based on which birdbaths they appear in. (Note the data considers a birdbath independently by season and year
+
+Most of this clustering code is inspired by: <https://www.statmethods.net/advstats/cluster.html>
+
+```{r}
+# Determine number of clusters
+wss <- (nrow(bird_matrix)-1)*sum(apply(bird_matrix,2,var))
+for (i in 2:30) wss[i] <- sum(kmeans(bird_matrix,
+   centers=i)$withinss)
+plot(1:30, wss, type="b", xlab="Number of Clusters",
+  ylab="Within groups sum of squares")
+
+```
+
+```{r}
+
+# K-Means Cluster Analysis
+fit <- kmeans(bird_matrix, 4) # 4 cluster solution seems to work well
+
+# append cluster assignment
+kmeans_out <- as.data.frame(fit$cluster) %>%
+  as_tibble(rownames = "bird_name") %>%
+  rename(cluster = "fit$cluster") %>%
+  full_join(birds, by = "bird_name")
+
+# get top labels for each cluster
+cluster_labels <- kmeans_out %>%
+  group_by(cluster) %>%
+  arrange(desc(total), .by_group = TRUE) %>%
+  slice_head(n = 2) %>%
+  mutate(bird = bird_name) %>%
+  select(bird_name, bird)
+
+kmeans_out <- kmeans_out %>%
+  full_join(cluster_labels) 
+
+kmeans_out$bird[is.na(kmeans_out$bird)]<- ""
+
+```
+
+The next visualilzation section is inspired by <https://www.datanovia.com/en/blog/k-means-clustering-visualization-in-r-step-by-step-guide/>
+
+**Create Data for Plotting**
+
+```{r}
+# Dimension reduction using PCA
+res.pca <- prcomp(bird_matrix,  scale = TRUE, rank = 4)
+# Coordinates of individuals
+ind.coord <- as.data.frame(get_pca_ind(res.pca)$coord)
+# Add clusters obtained using the K-means algorithm
+ind.coord$cluster <- factor(fit$cluster)
+# Add Species groups from the original data sett
+ind.coord$total_count <- birds$total
+ind.coord$bird <- kmeans_out$bird
+
+# Data inspection
+#head(ind.coord)
+
+# Percentage of variance explained by dimensions
+eigenvalue <- round(get_eigenvalue(res.pca), 1)
+variance.percent <- eigenvalue$variance.percent
+#head(eigenvalue)
+```
+
+**plot**
+
+```{r}
+p <- ggscatter(
+  ind.coord, x = "Dim.1", y = "Dim.2", 
+  color = "cluster", palette = "npg", ellipse = TRUE, ellipse.type = "convex",
+   size = 1.5,  legend = "right", ggtheme = theme_bw(),
+  xlab = paste0("First Cluster Dimension (variance:", variance.percent[1], "% )" ),
+  ylab = paste0("Second Cluster Dimension (variance:", variance.percent[2], "% )" )
+) +
+  geom_label_repel(aes(label = bird, color = cluster) , force = 5,
+                   min.segment.length = 0.1,
+                  max.overlaps = 200, fill = alpha(c("white"),0.5) ,
+                  show.legend = FALSE) +
+  labs(
+    title = "Birds of a Feather, a #TidyTuesday plot",
+    subtitle = "Common Clusters of Birds seen at Given Austalian Birdbaths",
+    caption = "Data from Cleary et al, 2016: https://doi.org/10.1371/journal.pone.0150899 ")
+
+p
+
+# alt text:  A scatter plot showing 4 clusters of Australian birds commonly seen together. Australian Magpies and Noisy Miners are grouped together in an outlier.
+```
+
+It's not unlikely that these clusters overlap with the region and season variables, but that's an area for future exploration, and beyond the scope of this \#TidyTuesday exercise.
+
+**Export**
+
+```{r}
+ggsave( "TT_Bird_clusters.png",p, dpi = 600)
+```
